@@ -1,7 +1,9 @@
 use texture_synthesis as ts;
+use texture_synthesis::pixel::Rgb;
+use texture_synthesis::Session;
 
 fn main() -> Result<(), ts::Error> {
-    let texsynth = ts::Session::builder()
+    let texsynth: Session<Rgb> = ts::SessionBuilder::default()
         // let the generator know which part we would like to fill in
         // if we had more examples, they would be additional information
         // the generator could use to inpaint

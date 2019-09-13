@@ -3,6 +3,7 @@ use structopt::StructOpt;
 use std::path::PathBuf;
 use texture_synthesis::{
     image::ImageOutputFormat as ImgFmt, Error, Example, ImageSource, SampleMethod, Session,
+    SessionBuilder,
 };
 
 fn parse_size(input: &str) -> Result<(u32, u32), std::num::ParseIntError> {
@@ -233,7 +234,7 @@ fn real_main() -> Result<(), Error> {
         }
     }
 
-    let mut sb = Session::builder();
+    let mut sb = SessionBuilder::default();
 
     // TODO: Make inpaint work with multiple examples
     if let Some(ref inpaint) = args.inpaint {
@@ -276,9 +277,9 @@ fn real_main() -> Result<(), Error> {
         sb = sb.resize_input(insize.0, insize.1);
     }
 
-    let session = sb.build()?;
+    let session: Session<Rgb> = sb.build()?;
 
-    let progress: Option<Box<dyn texture_synthesis::GeneratorProgress>> =
+    let progress: Option<Box<dyn texture_synthesis::GeneratorProgress<Rgb>>> =
         if !args.tweaks.no_progress {
             let progress = ProgressWindow::new();
 
@@ -316,6 +317,7 @@ fn real_main() -> Result<(), Error> {
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 #[cfg(feature = "progress")]
 use minifb::Window;
+use texture_synthesis::pixel::{Rgb, SynthPixel};
 
 pub struct ProgressWindow {
     #[cfg(feature = "progress")]
@@ -387,8 +389,8 @@ impl Drop for ProgressWindow {
     }
 }
 
-impl texture_synthesis::GeneratorProgress for ProgressWindow {
-    fn update(&mut self, update: texture_synthesis::ProgressUpdate<'_>) {
+impl<P: SynthPixel> texture_synthesis::GeneratorProgress<P> for ProgressWindow {
+    fn update(&mut self, update: texture_synthesis::ProgressUpdate<'_, P>) {
         if update.total.total != self.total_len {
             self.total_len = update.total.total;
             self.total_pb.set_length(self.total_len as u64);
@@ -420,6 +422,7 @@ impl texture_synthesis::GeneratorProgress for ProgressWindow {
                 }
 
                 let pixels = &update.image;
+                let pixels = P::into_dynamic_image(update.image).into_rgba();
                 if pixels.len() % 4 != 0 {
                     return;
                 }

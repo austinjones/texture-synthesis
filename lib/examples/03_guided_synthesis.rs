@@ -1,7 +1,9 @@
 use texture_synthesis as ts;
+use texture_synthesis::pixel::Rgb;
+use texture_synthesis::Session;
 
 fn main() -> Result<(), ts::Error> {
-    let texsynth = ts::Session::builder()
+    let texsynth: Session<Rgb> = ts::SessionBuilder::default()
         // NOTE: it is important that example(s) and their corresponding guides have same size(s)
         // you can ensure that by overwriting the input images sizes with .resize_input()
         .add_example(ts::Example::builder(&"imgs/2.jpg").with_guide(&"imgs/masks/2_example.jpg"))

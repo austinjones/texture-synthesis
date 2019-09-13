@@ -1,5 +1,5 @@
 use texture_synthesis as ts;
-use texture_synthesis::pixel::Rgb;
+use texture_synthesis::pixel::Rgba;
 use texture_synthesis::Session;
 
 fn main() -> Result<(), ts::Error> {
@@ -8,17 +8,16 @@ fn main() -> Result<(), ts::Error> {
     // but what if we want to tile an existing image?
     // we can use inpaint!
 
-    let texsynth: Session<Rgb> = ts::SessionBuilder::default()
+    let texsynth: Session<Rgba> = ts::SessionBuilder::default()
         // load a mask that specifies borders of the image we can modify to make it tiling
-        .inpaint_example(&"imgs/masks/1_tile.jpg", ts::Example::new(&"imgs/1.jpg"))
+        .add_example(&"imgs/transparency.png")
+        .load_target_guide(&"imgs/masks/2_target.jpg")
         //ensure correct sizes
         .resize_input(400, 400)
         .output_size(400, 400)
-        //turn on tiling mode!
-        .tiling_mode(true)
         .build()?;
 
     let generated = texsynth.run(None);
 
-    generated.save("out/06.jpg")
+    generated.save("out/07.png")
 }

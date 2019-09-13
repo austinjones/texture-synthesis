@@ -1,7 +1,9 @@
 use texture_synthesis as ts;
+use texture_synthesis::pixel::Rgb;
+use texture_synthesis::Session;
 
 fn main() -> Result<(), ts::Error> {
-    let texsynth = ts::Session::builder()
+    let texsynth: Session<Rgb> = ts::SessionBuilder::default()
         // load example which will serve as our style, note you can have more than 1!
         .add_examples(&[&"imgs/multiexample/4.jpg"])
         // load target which will be the content

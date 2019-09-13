@@ -4,7 +4,10 @@ use rstar::RTree;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, RwLock};
 
+use crate::pixel::{SynthPixel, SynthPixelBuffer};
 use crate::{img_pyramid::*, SamplingMethod};
+use image::{DynamicImage, ImageBuffer, Luma, LumaA, Pixel, Rgb, Rgba};
+use std::fs::File;
 
 #[derive(Debug)]
 pub struct GeneratorParams {
@@ -42,30 +45,35 @@ impl CandidateStruct {
     fn clear(&mut self) {
         self.k_neighs.clear();
     }
+
+    fn resize(&mut self, len: usize, value: (SignedCoord2D, MapId)) {
+        self.k_neighs.resize(len, value);
+    }
 }
 
-struct GuidesStruct<'a> {
-    pub example_guides: Vec<ImageBuffer<'a>>, // as many as there are examples
-    pub target_guide: ImageBuffer<'a>,        //single for final color_map
+struct GuidesStruct<P: SynthPixel> {
+    pub example_guides: Vec<SynthPixelBuffer<P>>, // as many as there are examples
+    pub target_guide: SynthPixelBuffer<P>,        //single for final color_map
 }
 
-pub(crate) struct GuidesPyramidStruct {
-    pub example_guides: Vec<ImagePyramid>, // as many as there are examples
-    pub target_guide: ImagePyramid,        //single for final color_map
+pub(crate) struct GuidesPyramidStruct<P: SynthPixel> {
+    pub example_guides: Vec<ImagePyramid<P>>, // as many as there are examples
+    pub target_guide: ImagePyramid<P>,        //single for final color_map
 }
 
-impl GuidesPyramidStruct {
-    fn to_guides_struct(&self, level: usize) -> GuidesStruct<'_> {
-        let tar_guide = ImageBuffer::from(&self.target_guide.pyramid[level]);
+impl<'a, P: SynthPixel> GuidesPyramidStruct<P> {
+    fn to_guides_struct(&self, level: usize) -> GuidesStruct<P> {
+        let tar_guide = &self.target_guide.pyramid[level];
         let ex_guide = self
             .example_guides
             .iter()
-            .map(|a| ImageBuffer::from(&a.pyramid[level]))
+            .map(|a| &a.pyramid[level])
+            .cloned()
             .collect();
 
         GuidesStruct {
             example_guides: ex_guide,
-            target_guide: tar_guide,
+            target_guide: tar_guide.clone(),
         }
     }
 }
@@ -154,44 +162,8 @@ impl ColorPattern {
     }
 }
 
-#[derive(Clone)]
-pub(crate) struct ImageBuffer<'a> {
-    buffer: &'a [u8],
-    width: usize,
-    height: usize,
-}
-
-impl<'a> ImageBuffer<'a> {
-    #[inline]
-    fn is_in_bounds(&self, coord: SignedCoord2D) -> bool {
-        coord.x >= 0 && coord.y >= 0 && coord.x < self.width as i32 && coord.y < self.height as i32
-    }
-
-    #[inline]
-    fn get_pixel(&self, x: u32, y: u32) -> &'a image::Rgba<u8> {
-        let ind = (y as usize * self.width + x as usize) * 4;
-        unsafe { &*((&self.buffer[ind..ind + 4]).as_ptr() as *const image::Rgba<u8>) }
-    }
-
-    #[inline]
-    fn dimensions(&self) -> (u32, u32) {
-        (self.width as u32, self.height as u32)
-    }
-}
-
-impl<'a> From<&'a image::RgbaImage> for ImageBuffer<'a> {
-    fn from(img: &'a image::RgbaImage) -> Self {
-        let (width, height) = img.dimensions();
-        Self {
-            buffer: img,
-            width: width as usize,
-            height: height as usize,
-        }
-    }
-}
-
-pub struct Generator {
-    pub(crate) color_map: image::RgbaImage,
+pub struct Generator<P: SynthPixel> {
+    pub(crate) color_map: SynthPixelBuffer<P>,
     coord_map: Vec<(Coord2D, MapId)>, //list of samples coordinates from example map
     id_map: Vec<(PatchId, MapId)>,    // list of all id maps of our generated image
     pub(crate) output_size: (u32, u32), // size of the generated image
@@ -202,12 +174,12 @@ pub struct Generator {
     locked_resolved: usize, //used for inpainting, to not backtrack these pixels
 }
 
-impl Generator {
+impl<P: SynthPixel> Generator<P> {
     pub(crate) fn new(size: (u32, u32)) -> Self {
         let s = (size.0 as usize) * (size.1 as usize);
         let unresolved: Vec<CoordFlat> = (0..(s as u32)).map(CoordFlat).collect();
         Self {
-            color_map: image::RgbaImage::new(size.0, size.1),
+            color_map: image::ImageBuffer::new(size.0, size.1),
             coord_map: vec![(Coord2D::from(0, 0), MapId(0)); s],
             id_map: vec![(PatchId(0), MapId(0)); s],
             output_size: size,
@@ -221,8 +193,8 @@ impl Generator {
 
     pub(crate) fn new_from_inpaint(
         size: (u32, u32),
-        inpaint_map: image::RgbaImage,
-        color_map: image::RgbaImage,
+        inpaint_map: SynthPixelBuffer<P>,
+        color_map: SynthPixelBuffer<P>,
         color_map_index: usize,
     ) -> Self {
         let inpaint_map = if inpaint_map.width() != size.0 || inpaint_map.height() != size.1 {
@@ -245,7 +217,7 @@ impl Generator {
         let mut rtree = RTree::new();
         //populate resolved, unresolved and coord map
         for (i, pixel) in inpaint_map.clone().pixels().enumerate() {
-            if pixel[0] < 255 {
+            if pixel.colors()[0] < 255 {
                 unresolved.push(CoordFlat(i as u32));
             } else {
                 resolved.push((CoordFlat(i as u32), Score(0.0)));
@@ -322,7 +294,7 @@ impl Generator {
         &self,
         update_coord: Coord2D,
         (example_coord, example_map_id): (Coord2D, MapId),
-        example_maps: &[ImageBuffer<'_>],
+        example_maps: &[&SynthPixelBuffer<P>],
         update_resolved_list: bool,
         score: Score,
         island_id: (PatchId, MapId),
@@ -344,9 +316,9 @@ impl Generator {
 
             *(self.id_map.as_ptr() as *mut (PatchId, MapId)).add(flat_coord.0 as usize) = island_id;
 
-            *(self.color_map.get_pixel(update_coord.x, update_coord.y) as *const image::Rgba<u8>
-                as *mut image::Rgba<u8>) = *example_maps[example_map_id.0 as usize]
-                .get_pixel(example_coord.x, example_coord.y);
+            *(self.color_map.get_pixel(update_coord.x, update_coord.y) as *const P as *mut P) =
+                *example_maps[example_map_id.0 as usize]
+                    .get_pixel(example_coord.x, example_coord.y);
         }
 
         if update_resolved_list {
@@ -440,25 +412,32 @@ impl Generator {
     }
 
     fn get_distances_to_k_neighs(&self, coord: Coord2D, k_neighs_2d: &[SignedCoord2D]) -> Vec<f64> {
+        let pixel_channels = P::color_len();
+
         let (dimx, dimy) = (f64::from(self.output_size.0), f64::from(self.output_size.1));
         let (x2, y2) = (f64::from(coord.x) / dimx, f64::from(coord.y) / dimy);
         //since we will have 3 channels per pixel, duplicate 3 times each
-        let mut k_neighs_dist: Vec<f64> = Vec::new();
+
+        let mut k_neighs_dist: Vec<f64> = Vec::with_capacity(k_neighs_2d.len());
         for coord in k_neighs_2d.iter() {
             let (x1, y1) = ((f64::from(coord.x)) / dimx, (f64::from(coord.y)) / dimy);
             let dist = (x1 - x2) * (x1 - x2) + (y1 - y2) * (y1 - y2);
-            k_neighs_dist.extend_from_slice(&[dist, dist, dist]);
+            k_neighs_dist.push(dist);
         }
         //divide by avg
         let avg: f64 = k_neighs_dist.iter().sum::<f64>() / (k_neighs_dist.len() as f64);
 
-        k_neighs_dist.iter().map(|d| d / avg).collect()
+        k_neighs_dist
+            .iter()
+            .map(|d| d / avg)
+            .flat_map(|e| std::iter::repeat(e).take(pixel_channels))
+            .collect()
     }
 
     pub(crate) fn resolve_random_batch(
         &mut self,
         steps: usize,
-        example_maps: &[ImageBuffer<'_>],
+        example_maps: &[&SynthPixelBuffer<P>],
         seed: u64,
     ) {
         for i in 0..steps {
@@ -474,12 +453,17 @@ impl Generator {
         self.locked_resolved += steps; //lock these pixels from being re-resolved
     }
 
-    fn resolve_at_random(&self, my_coord: Coord2D, example_maps: &[ImageBuffer<'_>], seed: u64) {
+    fn resolve_at_random(
+        &self,
+        my_coord: Coord2D,
+        example_maps: &[&SynthPixelBuffer<P>],
+        seed: u64,
+    ) {
         let rand_map: u32 = Pcg32::seed_from_u64(seed).gen_range(0, example_maps.len()) as u32;
         let rand_x: u32 =
-            Pcg32::seed_from_u64(seed).gen_range(0, example_maps[rand_map as usize].width as u32);
-        let rand_y: u32 =
-            Pcg32::seed_from_u64(seed).gen_range(0, example_maps[rand_map as usize].height as u32);
+            Pcg32::seed_from_u64(seed).gen_range(0, example_maps[rand_map as usize].width() as u32);
+        let rand_y: u32 = Pcg32::seed_from_u64(seed)
+            .gen_range(0, example_maps[rand_map as usize].height() as u32);
 
         self.update(
             my_coord,
@@ -503,7 +487,7 @@ impl Generator {
         candidates_vec: &'a mut Vec<CandidateStruct>,
         unresolved_coord: Coord2D,
         k_neighs: &[SignedCoord2D],
-        example_maps: &[ImageBuffer<'_>],
+        example_maps: &[&SynthPixelBuffer<P>],
         valid_samples_mask: &[SamplingMethod],
         m: u32,
         m_seed: u64,
@@ -538,7 +522,7 @@ impl Generator {
             if check_coord_validity(
                 candidate_coord,
                 n_map_id,
-                &example_maps,
+                example_maps,
                 &valid_samples_mask[n_map_id.0 as usize],
             ) {
                 //lets construct the full candidate pattern of neighbors identical to the center coord
@@ -557,7 +541,7 @@ impl Generator {
                         candidate_coord.y + shift.1,
                     );
 
-                    *output = (n2_coord, n_map_id)
+                    *output = (n2_coord, n_map_id);
                 }
 
                 //record the candidate info
@@ -590,6 +574,7 @@ impl Generator {
                     break;
                 }
             }
+
             //for patch id (since we are not copying from a generated patch anymore), we take the pixel location in the example map
             let map_id = MapId(rand_map);
             let patch_id = PatchId(
@@ -598,6 +583,7 @@ impl Generator {
                     .to_flat((dims.0 as u32, dims.1 as u32))
                     .0,
             );
+
             //lets construct the full neighborhood pattern
             candidates_vec[candidate_count]
                 .k_neighs
@@ -622,6 +608,32 @@ impl Generator {
         }
 
         &candidates_vec[0..candidate_count]
+    }
+
+    fn generate_random_candidate<R: Rng>(
+        &self,
+        rng: &mut R,
+        example_maps: &[&SynthPixelBuffer<P>],
+        map_id: u32,
+        valid_samples_mask: &[SamplingMethod],
+    ) -> SignedCoord2D {
+        let max_x = example_maps[map_id as usize].dimensions().0;
+        let max_y = example_maps[map_id as usize].dimensions().1;
+        loop {
+            let rand_x = rng.gen_range(0, max_x) as i32;
+            let rand_y = rng.gen_range(0, max_y) as i32;
+            let candidate_coord = SignedCoord2D::from(rand_x, rand_y);
+            if !check_coord_validity(
+                candidate_coord,
+                MapId(map_id),
+                example_maps,
+                &valid_samples_mask[map_id as usize],
+            ) {
+                continue;
+            }
+
+            return candidate_coord;
+        }
     }
 
     /// Returns an image of Ids for visualizing the 'copy islands' and map ids of those islands
@@ -674,7 +686,7 @@ impl Generator {
     }
 
     //replace every resolved pixel with a pixel from a new level
-    fn next_pyramid_level(&mut self, example_maps: &[ImageBuffer<'_>]) {
+    fn next_pyramid_level(&mut self, example_maps: &[&SynthPixelBuffer<P>]) {
         for (coord_flat, _) in self.resolved.read().unwrap().iter() {
             let resolved_2d = coord_flat.to_2d(self.output_size);
             let (example_map_coord, example_map_id) = self.coord_map[coord_flat.0 as usize]; //so where the current pixel came from
@@ -688,9 +700,9 @@ impl Generator {
     pub(crate) fn main_resolve_loop(
         &mut self,
         params: &GeneratorParams,
-        example_maps_pyramid: &[ImagePyramid],
-        mut progress: Option<Box<dyn crate::GeneratorProgress>>,
-        guides_pyramid: &Option<GuidesPyramidStruct>,
+        example_maps_pyramid: &[ImagePyramid<P>],
+        mut progress: Option<Box<dyn crate::GeneratorProgress<P>>>,
+        guides_pyramid: &Option<GuidesPyramidStruct<P>>,
         valid_samples: &[SamplingMethod],
     ) {
         let total_pixels_to_resolve = self.unresolved.lock().unwrap().len();
@@ -720,7 +732,7 @@ impl Generator {
 
             //update pyramid level
             if pyramid_level > 0 {
-                self.next_pyramid_level(&example_maps);
+                self.next_pyramid_level(example_maps.as_slice());
             }
             pyramid_level += 1;
             pyramid_level = pyramid_level.min(params.p_stages - 1); //dont go beyond
@@ -776,14 +788,13 @@ impl Generator {
                         let mut candidates_guide_patterns: Vec<ColorPattern> = Vec::new();
                         candidates_guide_patterns.resize(max_candidate_count, ColorPattern::new());
 
-                        let out_color_map = &[ImageBuffer::from(&self.color_map)];
+                        let out_color_map = &[&self.color_map];
 
                         loop {
                             // Get the next work item
                             let i = processed_pixel_count.fetch_add(1, Ordering::Relaxed);
 
                             let update_resolved_list: bool;
-
                             if i >= pixels_to_resolve {
                                 // We've processed everything, so finish the worker
                                 break;
@@ -829,7 +840,7 @@ impl Generator {
                                     &mut candidates,
                                     unresolved_2d,
                                     &k_neighs,
-                                    &example_maps,
+                                    example_maps.as_slice(),
                                     &valid_samples,
                                     params.random_sample_locations as u32,
                                     loop_seed + 1,
@@ -837,10 +848,10 @@ impl Generator {
 
                                 // 3.1 get patterns for color maps
                                 for (cand_i, cand) in candidates.iter().enumerate() {
-                                    k_neighs_to_color_pattern(
+                                    k_neighs_to_color_pattern::<P>(
                                         &cand.k_neighs,
-                                        image::Rgb([0, 0, 0]),
-                                        &example_maps,
+                                        P::greyscale(0),
+                                        example_maps.as_slice(),
                                         &mut candidates_patterns[cand_i],
                                         false,
                                     );
@@ -850,7 +861,7 @@ impl Generator {
 
                                 k_neighs_to_color_pattern(
                                     &k_neighs_w_map_id, //feed into the function with always 0 index of the sample map
-                                    image::Rgb([0, 0, 0]),
+                                    P::greyscale(0),
                                     out_color_map,
                                     &mut my_pattern,
                                     is_tiling_mode,
@@ -860,10 +871,12 @@ impl Generator {
                                 let (my_cost, guide_cost) = if let Some(ref in_guides) = guides {
                                     // populate guidance patterns for candidates
                                     for (cand_i, cand) in candidates.iter().enumerate() {
+                                        let source_maps: Vec<&SynthPixelBuffer<P>> =
+                                            in_guides.example_guides.iter().collect();
                                         k_neighs_to_color_pattern(
                                             &cand.k_neighs,
-                                            image::Rgb([0, 0, 0]),
-                                            &in_guides.example_guides,
+                                            P::greyscale(0),
+                                            source_maps.as_slice(),
                                             &mut candidates_guide_patterns[cand_i],
                                             false,
                                         );
@@ -871,8 +884,8 @@ impl Generator {
                                         //get example pattern to compare to
                                         k_neighs_to_color_pattern(
                                             &k_neighs_w_map_id,
-                                            image::Rgb([0, 0, 0]),
-                                            &[in_guides.target_guide.clone()],
+                                            P::greyscale(0),
+                                            &[&in_guides.target_guide.clone()],
                                             &mut my_guide_pattern,
                                             is_tiling_mode,
                                         );
@@ -908,7 +921,7 @@ impl Generator {
                                 self.update(
                                     unresolved_2d,
                                     (best_match_coord, best_match_map_id),
-                                    &example_maps,
+                                    example_maps.as_slice(),
                                     update_resolved_list,
                                     score,
                                     best_match.id,
@@ -967,14 +980,16 @@ impl Generator {
     }
 }
 
-fn k_neighs_to_color_pattern(
+fn k_neighs_to_color_pattern<P: SynthPixel>(
     k_neighs: &[(SignedCoord2D, MapId)],
-    outside_color: image::Rgb<u8>,
-    source_maps: &[ImageBuffer<'_>],
+    outside_color: P,
+    source_maps: &[&SynthPixelBuffer<P>],
     pattern: &mut ColorPattern,
     is_wrap_mode: bool,
 ) {
-    pattern.0.resize(k_neighs.len() * 3, 0);
+    let pixel_color_len = P::color_len();
+    pattern.0.resize(k_neighs.len() * pixel_color_len, 0);
+
     let mut i = 0;
 
     let wrap_dim = (
@@ -989,21 +1004,17 @@ fn k_neighs_to_color_pattern(
             *n_coord
         };
 
-        let end = i + 3;
-
         //check if he haven't gone outside the possible bounds
-        if source_maps[n_map.0 as usize].is_in_bounds(coord) {
-            pattern.0[i..end].copy_from_slice(
-                &(source_maps[n_map.0 as usize])
-                    .get_pixel(coord.x as u32, coord.y as u32)
-                    .0[..3],
-            )
+        if check_coord_validity(coord, *n_map, &source_maps, &SamplingMethod::All) {
+            (source_maps[n_map.0 as usize])
+                .get_pixel(coord.x as u32, coord.y as u32)
+                .write(&mut pattern.0[i..i + pixel_color_len])
         } else {
-            // if we have gone out of bounds, then just fill as outside color
-            pattern.0[i..end].copy_from_slice(&outside_color.0[..]);
-        }
+            //if we have, then just fill as outside color
+            outside_color.write(&mut pattern.0[i..i + pixel_color_len])
+        };
 
-        i = end;
+        i += pixel_color_len;
     }
 }
 
@@ -1134,13 +1145,20 @@ impl PrerenderedU8Function {
 }
 
 #[inline]
-fn check_coord_validity(
+fn is_in_bounds<P: SynthPixel>(buffer: &SynthPixelBuffer<P>, coord: SignedCoord2D) -> bool {
+    coord.x >= 0
+        && coord.y >= 0
+        && coord.x < buffer.width() as i32
+        && coord.y < buffer.height() as i32
+}
+
+fn check_coord_validity<P: SynthPixel>(
     coord: SignedCoord2D,
     map_id: MapId,
-    example_maps: &[ImageBuffer<'_>],
+    example_maps: &[&SynthPixelBuffer<P>],
     mask: &SamplingMethod,
 ) -> bool {
-    if mask.is_ignore() || !example_maps[map_id.0 as usize].is_in_bounds(coord) {
+    if mask.is_ignore() || !is_in_bounds(&example_maps[map_id.0 as usize], coord) {
         return false;
     }
 
@@ -1152,21 +1170,21 @@ fn check_coord_validity(
 }
 
 //get all the example images from a single pyramid level
-fn get_single_example_level<'a>(
-    example_maps_pyramid: &'a [ImagePyramid],
+fn get_single_example_level<P: SynthPixel>(
+    example_maps_pyramid: &[ImagePyramid<P>],
     pyramid_level: usize,
-) -> Vec<ImageBuffer<'a>> {
+) -> Vec<&SynthPixelBuffer<P>> {
     example_maps_pyramid
         .iter()
-        .map(|a| ImageBuffer::from(&a.pyramid[pyramid_level]))
+        .map(|a| &a.pyramid[pyramid_level])
         .collect()
 }
 
 //get all the guide images from a single pyramid level
-fn get_single_guide_level(
-    guides_pyramid: &Option<GuidesPyramidStruct>,
+fn get_single_guide_level<P: SynthPixel>(
+    guides_pyramid: &Option<GuidesPyramidStruct<P>>,
     pyramid_level: usize,
-) -> Option<GuidesStruct> {
+) -> Option<GuidesStruct<P>> {
     if let Some(ref guides_pyr) = guides_pyramid {
         Some(guides_pyr.to_guides_struct(pyramid_level))
     } else {

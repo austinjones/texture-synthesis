@@ -1,8 +1,10 @@
 use texture_synthesis as ts;
+use texture_synthesis::pixel::Rgb;
+use texture_synthesis::Session;
 
 fn main() -> Result<(), ts::Error> {
     // create a new session
-    let texsynth = ts::Session::builder()
+    let texsynth: Session<Rgb> = ts::SessionBuilder::default()
         // load multiple example image
         .add_examples(&[
             &"imgs/multiexample/1.jpg",

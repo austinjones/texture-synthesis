@@ -1,6 +1,8 @@
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use std::time::{Duration, Instant};
 use texture_synthesis as ts;
+use texture_synthesis::pixel::Rgb;
+use texture_synthesis::Session;
 
 fn single_example(c: &mut Criterion) {
     static DIM: u32 = 25;
@@ -17,7 +19,7 @@ fn single_example(c: &mut Criterion) {
             b.iter_custom(|iters| {
                 let mut total_elapsed = Duration::new(0, 0);
                 for _i in 0..iters {
-                    let sess = ts::Session::builder()
+                    let sess: Session<Rgb> = ts::SessionBuilder::new()
                         .add_example(example_img.clone())
                         .seed(120)
                         .output_size(dim, dim)
@@ -56,7 +58,7 @@ fn multi_example(c: &mut Criterion) {
             b.iter_custom(|iters| {
                 let mut total_elapsed = Duration::new(0, 0);
                 for _i in 0..iters {
-                    let sess = ts::Session::builder()
+                    let sess: Session<Rgb> = ts::SessionBuilder::new()
                         .add_examples(example_imgs.iter().cloned())
                         .resize_input(dim, dim)
                         //.random_init(10)
@@ -94,7 +96,7 @@ fn guided(c: &mut Criterion) {
             b.iter_custom(|iters| {
                 let mut total_elapsed = Duration::new(0, 0);
                 for _i in 0..iters {
-                    let sess = ts::Session::builder()
+                    let sess: Session<Rgb> = ts::SessionBuilder::new()
                         .add_example(
                             ts::Example::builder(example_img.clone()).with_guide(guide_img.clone()),
                         )
@@ -133,7 +135,7 @@ fn style_transfer(c: &mut Criterion) {
             b.iter_custom(|iters| {
                 let mut total_elapsed = Duration::new(0, 0);
                 for _i in 0..iters {
-                    let sess = ts::Session::builder()
+                    let sess: Session<Rgb> = ts::SessionBuilder::new()
                         .add_example(example_img.clone())
                         .load_target_guide(target_img.clone())
                         .output_size(dim, dim)
@@ -168,7 +170,7 @@ fn inpaint(c: &mut Criterion) {
             b.iter_custom(|iters| {
                 let mut total_elapsed = Duration::new(0, 0);
                 for _i in 0..iters {
-                    let sess = ts::Session::builder()
+                    let sess: Session<Rgb> = ts::SessionBuilder::new()
                         .inpaint_example(
                             inpaint_mask.clone(),
                             ts::Example::builder(example_img.clone())
@@ -207,7 +209,7 @@ fn tiling(c: &mut Criterion) {
             b.iter_custom(|iters| {
                 let mut total_elapsed = Duration::new(0, 0);
                 for _i in 0..iters {
-                    let sess = ts::Session::builder()
+                    let sess: Session<Rgb> = ts::SessionBuilder::new()
                         .inpaint_example(inpaint_mask.clone(), example_img.clone())
                         .resize_input(dim, dim)
                         .output_size(dim, dim)

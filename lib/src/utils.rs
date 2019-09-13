@@ -1,3 +1,4 @@
+use crate::pixel::{SynthPixel, SynthPixelBuffer};
 use crate::Error;
 use std::path::Path;
 
@@ -29,10 +30,10 @@ where
     }
 }
 
-pub(crate) fn load_image(
+pub(crate) fn load_image<P: SynthPixel>(
     src: ImageSource<'_>,
     resize: Option<(u32, u32)>,
-) -> Result<image::RgbaImage, Error> {
+) -> Result<SynthPixelBuffer<P>, Error> {
     let img = match src {
         ImageSource::Memory(data) => image::load_from_memory(data),
         ImageSource::Path(path) => image::open(path),
@@ -40,26 +41,31 @@ pub(crate) fn load_image(
     }?;
 
     Ok(match resize {
-        None => img.to_rgba(),
+        None => P::from_dynamic_image(img),
         Some(ref size) => {
             use image::GenericImageView;
 
             if img.width() != size.0 || img.height() != size.1 {
-                image::imageops::resize(&img.to_rgba(), size.0, size.1, image::imageops::CatmullRom)
+                image::imageops::resize::<SynthPixelBuffer<P>>(
+                    &P::from_dynamic_image(img),
+                    size.0,
+                    size.1,
+                    image::imageops::CatmullRom,
+                )
             } else {
-                img.to_rgba()
+                P::from_dynamic_image(img)
             }
         }
     })
 }
 
-pub(crate) fn transform_to_guide_map(
-    image: image::RgbaImage,
+pub(crate) fn transform_to_guide_map<P: SynthPixel>(
+    image: SynthPixelBuffer<P>,
     size: Option<(u32, u32)>,
     blur_sigma: f32,
-) -> image::RgbaImage {
+) -> SynthPixelBuffer<P> {
     use image::GenericImageView;
-    let dyn_img = image::DynamicImage::ImageRgba8(image);
+    let dyn_img = P::into_dynamic_image(image);
 
     if let Some(s) = size {
         if dyn_img.width() != s.0 || dyn_img.height() != s.1 {
@@ -67,10 +73,11 @@ pub(crate) fn transform_to_guide_map(
         }
     }
 
-    dyn_img.blur(blur_sigma).grayscale().to_rgba()
+    let greyscale = dyn_img.blur(blur_sigma).grayscale();
+    P::from_dynamic_image(greyscale)
 }
 
-pub(crate) fn get_histogram(img: &image::RgbaImage) -> Vec<u32> {
+pub(crate) fn get_histogram<P: SynthPixel>(img: &SynthPixelBuffer<P>) -> Vec<u32> {
     let mut hist = vec![0; 256]; //0-255 incl
 
     let pixels = &img;
@@ -87,9 +94,12 @@ pub(crate) fn get_histogram(img: &image::RgbaImage) -> Vec<u32> {
 }
 
 //source will be modified to fit the target
-pub(crate) fn match_histograms(source: &mut image::RgbaImage, target: &image::RgbaImage) {
-    let target_hist = get_histogram(target);
-    let source_hist = get_histogram(source);
+pub(crate) fn match_histograms<P: SynthPixel>(
+    source: &mut SynthPixelBuffer<P>,
+    target: &SynthPixelBuffer<P>,
+) {
+    let target_hist = get_histogram::<P>(target);
+    let source_hist = get_histogram::<P>(source);
 
     //get commutative distrib
     let target_cdf = get_cdf(&target_hist);
@@ -100,7 +110,7 @@ pub(crate) fn match_histograms(source: &mut image::RgbaImage, target: &image::Rg
 
     for x in 0..dx {
         for y in 0..dy {
-            let pixel_value = source.get_pixel(x, y)[0]; //we only care about the first channel
+            let pixel_value = source.get_pixel(x, y).colors()[0]; //we only care about the first channel
             let pixel_source_cdf = source_cdf[pixel_value as usize];
 
             //now need to find by value similar cdf in the target
@@ -110,9 +120,7 @@ pub(crate) fn match_histograms(source: &mut image::RgbaImage, target: &image::Rg
                 .unwrap_or((pixel_value + 1) as usize) as u8
                 - 1;
 
-            let new_color: image::Rgba<u8> =
-                image::Rgba([new_pixel_val, new_pixel_val, new_pixel_val, 255]);
-            source.put_pixel(x, y, new_color);
+            source.put_pixel(x, y, P::greyscale(new_pixel_val));
         }
     }
 }
